@@ -62,84 +62,6 @@
  */
 class Cytron
 {
-public:
-
-	void taskMain();
-	static bool taskShouldExit;
-
-	/** control channels */
-	enum e_channel {
-		CH_VOLTAGE_LEFT = 0,
-		CH_VOLTAGE_RIGHT
-	};
-
-	/**  motors */
-	enum e_motor {
-		MOTOR_1 = 0,
-		MOTOR_2
-	};
-
-	/**
-	 * constructor
-	 * @param deviceName the name of the
-	 * 	serial port e.g. "/dev/ttyS2"
-	 * @param address the adddress  of the motor
-	 * 	(selectable on cytron)
-	 * @param baudRateParam Name of the parameter that holds the baud rate of this serial port
-	 */
-	Cytron(const char *deviceName, const char *baudRateParam);
-
-	/**
-	 * deconstructor
-	 */
-	virtual ~Cytron();
-
-	/**
-	 * @return position of a motor, rev
-	 */
-	float getMotorPosition(e_motor motor);
-
-	/**
-	 * @return speed of a motor, rev/sec
-	 */
-	float getMotorSpeed(e_motor motor);
-
-	/**
-	 * set the speed of a motor, rev/sec
-	 */
-	int setMotorSpeed(e_motor motor, float value);
-
-	/**
-	 * set the duty cycle of a motor
-	 */
-	int setMotorDutyCycle(e_motor motor, float value);
-
-	/**
-	 * Drive both motors. +1 = full forward, -1 = full backward
-	 */
-	int drive(float value);
-
-	/**
-	 * Turn. +1 = full right, -1 = full left
-	 */
-	int turn(float value);
-
-	/**
-	 * reset the encoders
-	 * @return status
-	 */
-	//int resetEncoders();
-
-	/**
-	 * read data from serial
-	 */
-	//int readEncoder();
-
-	/**
-	 * print status
-	 */
-	//void printStatus(char *string, size_t n);
-
 private:
 
 	// commands
@@ -214,7 +136,7 @@ private:
 
 	void _parameters_update();
 
-	static uint16_t _calcCRC(const uint8_t *buf, size_t n, uint16_t init = 0);
+	static uint8_t _calcCRC(const uint8_t *buf, size_t n, uint8_t init = 0);
 	int _sendUnsigned7Bit(e_command command, float data);
 	int _sendSigned16Bit(e_command command, float data);
 	int _sendNothing(e_command);
@@ -242,4 +164,82 @@ private:
 	 */
 	int _transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 			 uint8_t *rbuff, size_t rbytes, bool send_checksum = true, bool recv_checksum = false);
+
+public:
+
+	void taskMain();
+	static bool taskShouldExit;
+
+	/** control channels */
+	enum e_channel {
+		CH_VOLTAGE_LEFT = 0,
+		CH_VOLTAGE_RIGHT
+	};
+
+	/**  motors */
+	enum e_motor {
+		MOTOR_1 = 0,
+		MOTOR_2
+	};
+
+	/**
+	 * constructor
+	 * @param deviceName the name of the
+	 * 	serial port e.g. "/dev/ttyS2"
+	 * @param address the adddress  of the motor
+	 * 	(selectable on cytron)
+	 * @param baudRateParam Name of the parameter that holds the baud rate of this serial port
+	 */
+	Cytron(const char *deviceName, const char *baudRateParam);
+
+	/**
+	 * deconstructor
+	 */
+	virtual ~Cytron();
+
+	/**
+	 * @return position of a motor, rev
+	 */
+	float getMotorPosition(e_motor motor);
+
+	/**
+	 * @return speed of a motor, rev/sec
+	 */
+	float getMotorSpeed(e_motor motor);
+
+	/**
+	 * set the speed of a motor, rev/sec
+	 */
+	int setMotorSpeed(e_motor motor, float value);
+
+	/**
+	 * set the duty cycle of a motor
+	 */
+	int setMotorDutyCycle(e_motor motor, float value);
+
+	/**
+	 * Drive both motors. +1 = full forward, -1 = full backward
+	 */
+	int drive(float value);
+
+	/**
+	 * Turn. +1 = full right, -1 = full left
+	 */
+	int turn(float value);
+
+	/**
+	 * reset the encoders
+	 * @return status
+	 */
+	int resetEncoders();
+
+	/**
+	 * read data from serial
+	 */
+	int readEncoder();
+
+	/**
+	 * print status
+	 */
+	void showStatus(char *string, size_t n);
 };

@@ -41,7 +41,7 @@
  *
  */
 
-#include "Cytron.hpp"
+#include "cytron.hpp"
 #include <poll.h>
 #include <stdio.h>
 #include <math.h>
@@ -54,7 +54,6 @@
 
 #include <uORB/Publication.hpp>
 #include <drivers/drv_hrt.h>
-#include <math.h>
 
 // The Cytron has a serial communication timeout of 10ms.
 // Add a little extra to account for timing inaccuracy
@@ -120,7 +119,7 @@ Cytron::Cytron(const char *deviceName, const char *baudRateParam):
 	FD_ZERO(&_uart_set);
 
 	// setup default settings, reset encoders
-	resetEncoders();
+	//resetEncoders();
 }
 
 Cytron::~Cytron()
@@ -149,7 +148,7 @@ void Cytron::taskMain()
 	// It is updated at the end of every loop. Sometimes, if the actuator_controls_0 message came in right before
 	// I should have read the encoders, waitTime will be 0. This is fine. When waitTime is 0, poll() will return
 	// immediately with a timeout. (Or possibly with a message, if one happened to be available at that exact moment)
-	uint64_t encoderTaskLastRun = 0;
+	//uint64_t encoderTaskLastRun = 0;
 	int waitTime = 0;
 
 	uint64_t actuatorsLastWritten = 0;
@@ -188,7 +187,8 @@ void Cytron::taskMain()
 			orb_copy(ORB_ID(actuator_controls_0), _actuatorsSub, &_actuatorControls);
 			orb_copy(ORB_ID(actuator_armed), _armedSub, &_actuatorArmed);
 
-			int drive_ret = 0, turn_ret = 0;
+			int drive_ret = 0;
+			int turn_ret = 0;
 
 			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown
 					      || _actuatorArmed.force_failsafe || actuators_timeout;
@@ -241,77 +241,10 @@ void Cytron::taskMain()
 	orb_unsubscribe(_actuatorsSub);
 	orb_unsubscribe(_armedSub);
 	orb_unsubscribe(_paramSub);
+	}
 }
 
-/*int Cytron::readEncoder()
-{
-
-	uint8_t rbuff_pos[ENCODER_MESSAGE_SIZE];
-	// I am saving space by overlapping the two separate motor speeds, so that the final buffer will look like:
-	// [<speed 1> <speed 2> <status 2> <checksum 2>]
-	// And I just ignore all of the statuses and checksums. (The _transaction() function internally handles the
-	// checksum)
-	uint8_t rbuff_speed[ENCODER_SPEED_MESSAGE_SIZE + 4];
-
-	bool success = false;
-
-	for (int retry = 0; retry < TIMEOUT_RETRIES && !success; retry++) {
-		success = _transaction(CMD_READ_BOTH_ENCODERS, nullptr, 0, &rbuff_pos[0], ENCODER_MESSAGE_SIZE, false,
-				       true) == ENCODER_MESSAGE_SIZE;
-		success = success && _transaction(CMD_READ_SPEED_1, nullptr, 0, &rbuff_speed[0], ENCODER_SPEED_MESSAGE_SIZE, false,
-						  true) == ENCODER_SPEED_MESSAGE_SIZE;
-		success = success && _transaction(CMD_READ_SPEED_2, nullptr, 0, &rbuff_speed[4], ENCODER_SPEED_MESSAGE_SIZE, false,
-						  true) == ENCODER_SPEED_MESSAGE_SIZE;
-	}
-
-	if (!success) {
-		PX4_ERR("Error reading encoders");
-		return -1;
-	}
-
-	uint32_t count;
-	uint32_t speed;
-	uint8_t *count_bytes;
-	uint8_t *speed_bytes;
-
-	for (int motor = 0; motor <= 1; motor++) {
-		count = 0;
-		speed = 0;
-		count_bytes = &rbuff_pos[motor * 4];
-		speed_bytes = &rbuff_speed[motor * 4];
-
-		// Data from the cytron is big-endian. This converts the bytes to an integer, regardless of the
-		// endianness of the system this code is running on.
-		for (int byte = 0; byte < 4; byte++) {
-			count = (count << 8) + count_bytes[byte];
-			speed = (speed << 8) + speed_bytes[byte];
-		}
-
-		// The Cytron stores encoder counts as unsigned 32-bit ints. This can overflow, especially when starting
-		// at 0 and moving backward. The Cytron has overflow flags for this, but in my testing, they don't seem
-		// to work. This code detects overflow manually.
-		// These diffs are the difference between the count I just read from the Cytron and the last
-		// count that was read from the cytron for this motor. fwd_diff assumes that the wheel moved forward,
-		// and rev_diff assumes it moved backward. If the motor actually moved forward, then rev_diff will be close
-		// to 2^32 (UINT32_MAX). If the motor actually moved backward, then fwd_diff will be close to 2^32.
-		// To detect and account for overflow, I just assume that the smaller diff is correct.
-		// Strictly speaking, if the wheel rotated more than 2^31 encoder counts since the last time I checked, this
-		// will be wrong. But that's 1.7 million revolutions, so it probably won't come up.
-		uint32_t fwd_diff = count - _lastEncoderCount[motor];
-		uint32_t rev_diff = _lastEncoderCount[motor] - count;
-		// At this point, abs(diff) is always <= 2^31, so this cast from unsigned to signed is safe.
-		int32_t diff = fwd_diff <= rev_diff ? fwd_diff : -int32_t(rev_diff);
-		_encoderCounts[motor] += diff;
-		_lastEncoderCount[motor] = count;
-
-		_motorSpeeds[motor] = speed;
-	}
-
-	return 1;
-}
-*/
-
-void Cytron::printStatus(char *string, size_t n)
+void Cytron::showStatus(char *string, size_t n)
 {
 	snprintf(string, n, "pos1,spd1,pos2,spd2: %10.2f %10.2f %10.2f %10.2f\n",
 		 double(getMotorPosition(MOTOR_1)),
@@ -319,6 +252,7 @@ void Cytron::printStatus(char *string, size_t n)
 		 double(getMotorPosition(MOTOR_2)),
 		 double(getMotorSpeed(MOTOR_2)));
 }
+
 
 float Cytron::getMotorPosition(e_motor motor)
 {
