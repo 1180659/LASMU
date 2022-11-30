@@ -58,7 +58,7 @@
 #include "cytron.hpp"
 
 static bool thread_running = false;     /**< Deamon status flag */
-px4_task_t deamon_task;
+px4_task_t cytron_task;
 
 /**
  * Deamon management function.
@@ -146,7 +146,7 @@ int cytron_main(int argc, char *argv[])
 		}
 
 		Cytron::taskShouldExit = false;
-		deamon_task = px4_task_spawn_cmd("cytron",
+		cytron_task = px4_task_spawn_cmd("cytron",
 						 SCHED_DEFAULT,
 						 SCHED_PRIORITY_MAX - 10,
 						 2000,
