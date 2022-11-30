@@ -79,16 +79,12 @@ Cytron::Cytron(const char *deviceName, const char *baudRateParam):
 	_uart_set(),
 	_uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US},
 	_actuatorsSub(-1),
-	//_lastEncoderCount{0, 0},
-	//_encoderCounts{0, 0},
-	_motorSpeeds{0, 0}
+	_motorSpeeds{0}
 
 {
-	_param_handles.actuator_write_period_ms = 	param_find("RBCLW_WRITE_PER");
-	_param_handles.encoder_read_period_ms = 	param_find("RBCLW_READ_PER");
-	_param_handles.counts_per_rev = 			param_find("RBCLW_COUNTS_REV");
+	_param_handles.actuator_write_period_ms = 	param_find("CYTR_WRITE_PER");
 	_param_handles.serial_baud_rate = 			param_find(baudRateParam);
-	_param_handles.address = 					param_find("RBCLW_ADDRESS");
+	_param_handles.address = 					param_find("CYTR_ADDRESS");
 
 	_parameters_update();
 
@@ -117,28 +113,17 @@ Cytron::Cytron(const char *deviceName, const char *baudRateParam):
 	if (ret < 0) { err(1, "failed to set attr"); }
 
 	FD_ZERO(&_uart_set);
-
-	// setup default settings, reset encoders
-	//resetEncoders();
 }
 
 Cytron::~Cytron()
 {
 	setMotorDutyCycle(MOTOR_1, 0.0);
-	setMotorDutyCycle(MOTOR_2, 0.0);
 	close(_uart);
 }
 
 void Cytron::taskMain()
 {
-	// Make sure the Cytron is actually connected, so I don't just spam errors if it's not.
 	uint8_t rbuff[4];
-	int err_code = _transaction(CMD_READ_STATUS, nullptr, 0, &rbuff[0], sizeof(rbuff), false, true);
-
-	if (err_code <= 0) {
-		PX4_ERR("Unable to connect to Cytron. Shutting down Cytron driver.");
-		return;
-	}
 
 	// This main loop performs two different tasks, asynchronously:
 	// - Send actuator_controls_0 to the Cytron as soon as they are available
@@ -167,9 +152,8 @@ void Cytron::taskMain()
 	fds[2].fd = _armedSub;
 	fds[2].events = POLLIN;
 
-	memset((void *) &_wheelEncoderMsg[0], 0, sizeof(_wheelEncoderMsg));
-	_wheelEncoderMsg[0].pulses_per_rev = _parameters.counts_per_rev;
-	_wheelEncoderMsg[1].pulses_per_rev = _parameters.counts_per_rev;
+
+
 
 	while (!taskShouldExit) {
 
@@ -204,38 +188,14 @@ void Cytron::taskMain()
 				}
 
 			} else {
-				drive_ret = drive(_actuatorControls.control[actuator_controls_s::INDEX_THROTTLE]);
-				turn_ret = turn(_actuatorControls.control[actuator_controls_s::INDEX_YAW]);
+				drive_ret = setMotorDutyCycle(_actuatorControls.control[actuator_controls_s::INDEX_THROTTLE]);
 
-				if (drive_ret <= 0 || turn_ret <= 0) {
-					PX4_ERR("Error controlling Cytron. Drive err: %d. Turn err: %d", drive_ret, turn_ret);
+				if (drive_ret <= 0) {
+					PX4_ERR("Error controlling Cytron. Drive err: %d. ", drive_ret);
 				}
 			}
 
 			actuatorsLastWritten = hrt_absolute_time();
-
-		} else {
-			// A timeout occurred, which means that it's time to update the encoders
-		// 	encoderTaskLastRun = hrt_absolute_time();
-
-		// 	if (readEncoder() > 0) {
-
-		// 		for (int i = 0; i < 2; i++) {
-		// 			_wheelEncoderMsg[i].timestamp = encoderTaskLastRun;
-
-		// 			_wheelEncoderMsg[i].encoder_position = _encoderCounts[i];
-		// 			_wheelEncoderMsg[i].speed = _motorSpeeds[i];
-
-		// 			_wheelEncodersAdv[i].publish(_wheelEncoderMsg[i]);
-		// 		}
-
-		// 	} else {
-		// 		PX4_ERR("Error reading encoders");
-		// 	}
-		// }
-
-		// waitTime = _parameters.encoder_read_period_ms * 1000 - (hrt_absolute_time() - encoderTaskLastRun);
-		// waitTime = waitTime < 0 ? 0 : waitTime;
 	}
 
 	orb_unsubscribe(_actuatorsSub);
@@ -246,117 +206,32 @@ void Cytron::taskMain()
 
 void Cytron::showStatus(char *string, size_t n)
 {
-	snprintf(string, n, "pos1,spd1,pos2,spd2: %10.2f %10.2f %10.2f %10.2f\n",
-		 double(getMotorPosition(MOTOR_1)),
-		 double(getMotorSpeed(MOTOR_1)),
-		 double(getMotorPosition(MOTOR_2)),
-		 double(getMotorSpeed(MOTOR_2)));
-}
-
-
-float Cytron::getMotorPosition(e_motor motor)
-{
-	if (motor == MOTOR_1) {
-		return _encoderCounts[0];
-
-	} else if (motor == MOTOR_2) {
-		return _encoderCounts[1];
-
-	} else {
-		warnx("Unknown motor value passed to Cytron::getMotorPosition");
-		return NAN;
-	}
+	snprintf(string, n, "spd1: %10.2f \n",
+		 double(getMotorSpeed(MOTOR_1)));
 }
 
 float Cytron::getMotorSpeed(e_motor motor)
 {
 	if (motor == MOTOR_1) {
 		return _motorSpeeds[0];
-
-	} else if (motor == MOTOR_2) {
-		return _motorSpeeds[1];
-
 	} else {
 		warnx("Unknown motor value passed to Cytron::getMotorPosition");
 		return NAN;
 	}
 }
 
-int Cytron::setMotorSpeed(e_motor motor, float value)
+int Cytron::setMotorDutyCycle(float value)
 {
-	e_command command;
-
-	// send command
-	if (motor == MOTOR_1) {
-		if (value > 0) {
-			command = CMD_DRIVE_FWD_1;
-
-		} else {
-			command = CMD_DRIVE_REV_1;
-		}
-
-	} else if (motor == MOTOR_2) {
-		if (value > 0) {
-			command = CMD_DRIVE_FWD_2;
-
-		} else {
-			command = CMD_DRIVE_REV_2;
-		}
-
-	} else {
-		return -1;
-	}
-
-	return _sendUnsigned7Bit(command, value);
+	return _sendUnsigned7Bit(value);
 }
 
-int Cytron::setMotorDutyCycle(e_motor motor, float value)
-{
-
-	e_command command;
-
-	// send command
-	if (motor == MOTOR_1) {
-		command = CMD_SIGNED_DUTYCYCLE_1;
-
-	} else if (motor == MOTOR_2) {
-		command = CMD_SIGNED_DUTYCYCLE_2;
-
-	} else {
-		return -1;
-	}
-
-	return _sendSigned16Bit(command, value);
-}
-
-int Cytron::drive(float value)
-{
-	e_command command = value >= 0 ? CMD_DRIVE_FWD_MIX : CMD_DRIVE_REV_MIX;
-	return _sendUnsigned7Bit(command, value);
-}
-
-int Cytron::turn(float value)
-{
-	e_command command = value >= 0 ? CMD_TURN_LEFT : CMD_TURN_RIGHT;
-	return _sendUnsigned7Bit(command, value);
-}
-
-int Cytron::resetEncoders()
-{
-	return _sendNothing(CMD_RESET_ENCODERS);
-}
-
-int Cytron::_sendUnsigned7Bit(e_command command, float data)
+int Cytron::_sendUnsigned7Bit(float data)
 {
 	data = fabs(data);
 
-	if (data > 1.0f) {
-		data = 1.0f;
-	}
-
 	auto byte = (uint8_t)(data * INT8_MAX);
 	uint8_t recv_byte;
-	return _transaction(command, &byte, 1, &recv_byte, 1);
+	return _transaction(&byte, 1, &recv_byte, 1);
 }
 
 int Cytron::_sendSigned16Bit(e_command command, float data)
@@ -382,8 +257,6 @@ int Cytron::_sendNothing(e_command command)
 uint8_t Cytron::_calcCRC(const uint8_t *buf, size_t n, uint8_t init)
 {
 	uint8_t crc = init;
-
-
 	//Header + Address + Command
 	for (size_t byte = 0; byte < (n - 1) ; byte++) {
 		crc += buf[byte];
@@ -392,7 +265,7 @@ uint8_t Cytron::_calcCRC(const uint8_t *buf, size_t n, uint8_t init)
 	return crc;
 }
 
-int Cytron::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
+int Cytron::_transaction(uint8_t *wbuff, size_t wbytes,
 			   uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
 {
 	int err_code = 0;
@@ -484,8 +357,6 @@ int Cytron::_transaction(e_command cmd, uint8_t *wbuff, size_t wbytes,
 
 void Cytron::_parameters_update()
 {
-	param_get(_param_handles.counts_per_rev, &_parameters.counts_per_rev);
-	param_get(_param_handles.encoder_read_period_ms, &_parameters.encoder_read_period_ms);
 	param_get(_param_handles.actuator_write_period_ms, &_parameters.actuator_write_period_ms);
 	param_get(_param_handles.address, &_parameters.address);
 
