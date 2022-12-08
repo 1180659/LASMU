@@ -1,6 +1,3 @@
 module_name: Cytron Driver
-serial_config:
-    - command: cytron start -d ${SERIAL_DEV} -b ${BAUD_PARAM}
-      port_config_param:
-        name: CYTR_SER_CFG
-        group: Cytron
+Commands:
+    - command: cytron start ${PWM_INDEX} ${PWM_FREQUENCY}

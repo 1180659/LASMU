@@ -35,9 +35,14 @@ px4_add_module(
 	MAIN cytron
 	COMPILE_FLAGS
 	SRCS
-		cytron_main.cpp
 		cytron.cpp
+		cytron_main.cpp
+		cytron_params.cpp
 	MODULE_CONFIG
 		module.yaml
+
+	DEPENDS
+        	platforms__common
+        	drivers__pwm_out
 	)
 

@@ -1,406 +1,129 @@
-/****************************************************************************
- *
- *   Copyright (c) 2013 PX4 Development Team. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name PX4 nor the names of its contributors may be
- *    used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
- * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- ****************************************************************************/
+#include "cytron.h"
 
-/**
- * @file Cytron.cpp
- *
- * Cytron Motor Driver
- *
- * references:
- * http://downloads.orionrobotics.com/downloads/datasheets/motor_controller_robo_claw_R0401.pdf
- *
- */
+#include <px4_platform_common/px4_config.h>
+#include <px4_platform_common/tasks.h>
+#include <uORB/topics/actuator_controls.h>
+#include <uORB/topics/actuator_outputs.h>
+#include <uORB/uORB.h>
 
-#include "cytron.hpp"
+#include <cstdint>
+#include <cstring>
 #include <poll.h>
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
-#include <fcntl.h>
-#include <termios.h>
+#include <unistd.h>
 
-#include <systemlib/err.h>
-#include <systemlib/mavlink_log.h>
+// Set the minimum and maximum duty cycle values for the motor
+const float MIN_DUTY_CYCLE = 0.0f;
+const float MAX_DUTY_CYCLE = 1.0f;
 
-#include <uORB/Publication.hpp>
-#include <drivers/drv_hrt.h>
-
-// The Cytron has a serial communication timeout of 10ms.
-// Add a little extra to account for timing inaccuracy
-#define TIMEOUT_US 10500
-
-// If a timeout occurs during serial communication, it will immediately try again this many times
-#define TIMEOUT_RETRIES 1
-
-// If a timeout occurs while disarmed, it will try again this many times. This should be a higher number,
-// because stopping when disarmed is pretty important.
-#define STOP_RETRIES 10
-
-// Number of bytes returned by the Cytron when sending command 78, read both encoders
-#define ENCODER_MESSAGE_SIZE 10
-
-// Number of bytes for commands 18 and 19, read speeds.
-#define ENCODER_SPEED_MESSAGE_SIZE 7
-
-bool Cytron::taskShouldExit = false;
-
-Cytron::Cytron(const char *deviceName, const char *baudRateParam):
-	_uart(0),
-	_uart_set(),
-	_uart_timeout{.tv_sec = 0, .tv_usec = TIMEOUT_US},
-	_actuatorsSub(-1),
-	_motorSpeeds{0}
-
+Cytron::Cytron(int pwm_index, int pwm_frequency) :
+    _pwm_index(pwm_index),
+    _pwm_frequency(pwm_frequency),
+    _pwm_fd(-1),
+    _actuator_controls_sub(-1),
+    _actuator_outputs_pub(nullptr),
+    _duty_cycle(MIN_DUTY_CYCLE)
 {
-	_param_handles.actuator_write_period_ms = 	param_find("CYTR_WRITE_PER");
-	_param_handles.serial_baud_rate = 			param_find(baudRateParam);
-	_param_handles.address = 					param_find("CYTR_ADDRESS");
-
-	_parameters_update();
-
-	// start serial port
-	_uart = open(deviceName, O_RDWR | O_NOCTTY);
-
-	if (_uart < 0) { err(1, "could not open %s", deviceName); }
-
-	int ret = 0;
-	struct termios uart_config {};
-	ret = tcgetattr(_uart, &uart_config);
-
-	if (ret < 0) { err(1, "failed to get attr"); }
-
-	uart_config.c_oflag &= ~ONLCR; // no CR for every LF
-	ret = cfsetispeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set input speed"); }
-
-	ret = cfsetospeed(&uart_config, _parameters.serial_baud_rate);
-
-	if (ret < 0) { err(1, "failed to set output speed"); }
-
-	ret = tcsetattr(_uart, TCSANOW, &uart_config);
-
-	if (ret < 0) { err(1, "failed to set attr"); }
-
-	FD_ZERO(&_uart_set);
 }
 
-Cytron::~Cytron()
+int Cytron::init()
 {
-	setMotorDutyCycle(MOTOR_1, 0.0);
-	close(_uart);
+    // Open the PWM device
+    char pwm_dev_path[16];
+    snprintf(pwm_dev_path, sizeof(pwm_dev_path), PWM_OUTPUT_DEVICE_PATH, _pwm_index);
+    _pwm_fd = px4_open(pwm_dev_path, 0);
+    if (_pwm_fd < 0)
+    {
+        return -1;
+    }
+
+    // Set the PWM frequency for the motor
+    if (ioctl(_pwm_fd, PWM_SERVO_SET_UPDATE_RATE, _pwm_frequency) < 0)
+    {
+        return -1;
+    }
+
+    // Set the initial duty cycle for the motor
+    set_duty_cycle(_duty_cycle);
+
+    // Subscribe to the actuator_controls topic
+    _actuator_controls_sub = orb_subscribe(ORB_ID(actuator_controls));
+
+    // Set the update rate for the actuator_controls topic
+    orb_set_interval(_actuator_controls_sub, 1000 / _pwm_frequency);
+
+    // Publish the initial value of the actuator_outputs topic
+    actuator_outputs_s actuator_outputs = {};
+    actuator_outputs.output[0] = _duty_cycle;
+     _actuator_outputs_pub = orb_advertise(ORB_ID(actuator_outputs), &actuator_outputs);
+
+    return 0;
 }
 
-void Cytron::taskMain()
+void Cytron::set_duty_cycle(float duty_cycle)
 {
-	uint8_t rbuff[4];
+    // Clamp the duty cycle to the minimum and maximum values
+    if (duty_cycle < MIN_DUTY_CYCLE)
+    {
+        duty_cycle = MIN_DUTY_CYCLE;
+    }
+    else if (duty_cycle > MAX_DUTY_CYCLE)
+    {
+        duty_cycle = MAX_DUTY_CYCLE;
+    }
 
-	// This main loop performs two different tasks, asynchronously:
-	// - Send actuator_controls_0 to the Cytron as soon as they are available
-	// - Read the encoder values at a constant rate
-	// To do this, the timeout on the poll() function is used.
-	// waitTime is the amount of time left (int microseconds) until the next time I should read from the encoders.
-	// It is updated at the end of every loop. Sometimes, if the actuator_controls_0 message came in right before
-	// I should have read the encoders, waitTime will be 0. This is fine. When waitTime is 0, poll() will return
-	// immediately with a timeout. (Or possibly with a message, if one happened to be available at that exact moment)
-	//uint64_t encoderTaskLastRun = 0;
-	int waitTime = 0;
+    // Update the duty cycle for the motor
+    _duty_cycle = duty_cycle;
 
-	uint64_t actuatorsLastWritten = 0;
-
-	_actuatorsSub = orb_subscribe(ORB_ID(actuator_controls_0));
-	orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
-
-	_armedSub = orb_subscribe(ORB_ID(actuator_armed));
-	_paramSub = orb_subscribe(ORB_ID(parameter_update));
-
-	pollfd fds[3];
-	fds[0].fd = _paramSub;
-	fds[0].events = POLLIN;
-	fds[1].fd = _actuatorsSub;
-	fds[1].events = POLLIN;
-	fds[2].fd = _armedSub;
-	fds[2].events = POLLIN;
-
-
-
-
-	while (!taskShouldExit) {
-
-		int pret = poll(fds, sizeof(fds) / sizeof(pollfd), waitTime / 1000);
-
-		bool actuators_timeout = int(hrt_absolute_time() - actuatorsLastWritten) > 2000 * _parameters.actuator_write_period_ms;
-
-		if (fds[0].revents & POLLIN) {
-			orb_copy(ORB_ID(parameter_update), _paramSub, &_paramUpdate);
-			_parameters_update();
-		}
-
-		// No timeout, update on either the actuator controls or the armed state
-		if (pret > 0 && (fds[1].revents & POLLIN || fds[2].revents & POLLIN || actuators_timeout)) {
-			orb_copy(ORB_ID(actuator_controls_0), _actuatorsSub, &_actuatorControls);
-			orb_copy(ORB_ID(actuator_armed), _armedSub, &_actuatorArmed);
-
-			int drive_ret = 0;
-			int turn_ret = 0;
-
-			const bool disarmed = !_actuatorArmed.armed || _actuatorArmed.lockdown || _actuatorArmed.manual_lockdown
-					      || _actuatorArmed.force_failsafe || actuators_timeout;
-
-			if (disarmed) {
-				// If disarmed, I want to be certain that the stop command gets through.
-				int tries = 0;
-
-				while (tries < STOP_RETRIES && ((drive_ret = drive(0.0)) <= 0 || (turn_ret = turn(0.0)) <= 0)) {
-					PX4_ERR("Error trying to stop: Drive: %d, Turn: %d", drive_ret, turn_ret);
-					tries++;
-					px4_usleep(TIMEOUT_US);
-				}
-
-			} else {
-				drive_ret = setMotorDutyCycle(_actuatorControls.control[actuator_controls_s::INDEX_THROTTLE]);
-
-				if (drive_ret <= 0) {
-					PX4_ERR("Error controlling Cytron. Drive err: %d. ", drive_ret);
-				}
-			}
-
-			actuatorsLastWritten = hrt_absolute_time();
-	}
-
-	orb_unsubscribe(_actuatorsSub);
-	orb_unsubscribe(_armedSub);
-	orb_unsubscribe(_paramSub);
-	}
+    // Write the duty cycle to the PWM device
+    uint32_t pwm_value = static_cast<uint32_t>(_duty_cycle * PWM_HIGHEST_MAX);
+    ioctl(_pwm_fd, PWM_SERVO_SET(0), pwm_value);
 }
 
-void Cytron::showStatus(char *string, size_t n)
+void Cytron::start()
 {
-	snprintf(string, n, "spd1: %10.2f \n",
-		 double(getMotorSpeed(MOTOR_1)));
+    // Create a thread to run the motor control loop
+    px4_task_spawn_cmd("cytron",
+                       SCHED_DEFAULT,
+                       SCHED_PRIORITY_MAX - 5,
+                       1500,
+                       (px4_main_t)&motor_control_loop_trampoline,
+                       nullptr);
 }
 
-float Cytron::getMotorSpeed(e_motor motor)
+void *Cytron::motor_control_loop_trampoline(void *context)
 {
-	if (motor == MOTOR_1) {
-		return _motorSpeeds[0];
-	} else {
-		warnx("Unknown motor value passed to Cytron::getMotorPosition");
-		return NAN;
-	}
+    // Cast the context to a Cytron instance and run the motor control loop
+    Cytron *self = static_cast<Cytron *>(context);
+    self->motor_control_loop();
+    return nullptr;
 }
 
-int Cytron::setMotorDutyCycle(float value)
+void Cytron::motor_control_loop()
 {
-	return _sendUnsigned7Bit(value);
-}
+    // Set the thread name
+    px4_prctl(PR_SET_NAME, "cytron", px4_getpid());
 
-int Cytron::_sendUnsigned7Bit(float data)
-{
-	data = fabs(data);
+    // Poll for new data on the actuator_controls topic
+    actuator_controls_s actuator_controls = {};
+    pollfd fds[1] = {};
+    fds[0].fd = _actuator_controls_sub;
+    fds[0].events = POLLIN;
+    int ret = 0;
 
-	auto byte = (uint8_t)(data * INT8_MAX);
-	uint8_t recv_byte;
-	return _transaction(&byte, 1, &recv_byte, 1);
-}
+    while (!px4_task_should_exit() && (ret = poll(fds, 1, 1000)) >= 0)
+    {
+        // Check for updated data on the actuator_controls topic
+        if (ret > 0 && (fds[0].revents & POLLIN))
+        {
+            orb_copy(ORB_ID(actuator_controls), _actuator_controls_sub, &actuator_controls);
 
-int Cytron::_sendSigned16Bit(e_command command, float data)
-{
-	if (data > 1.0f) {
-		data = 1.0f;
+            // Update the duty cycle for the motor
+            set_duty_cycle(actuator_controls.control[0]);
 
-	} else if (data < -1.0f) {
-		data = -1.0f;
-	}
-
-	auto buff = (uint16_t)(data * INT16_MAX);
-	uint8_t recv_buff;
-	return _transaction(command, (uint8_t *) &buff, 2, &recv_buff, 1);
-}
-
-int Cytron::_sendNothing(e_command command)
-{
-	uint8_t recv_buff;
-	return _transaction(command, nullptr, 0, &recv_buff, 1);
-}
-
-uint8_t Cytron::_calcCRC(const uint8_t *buf, size_t n, uint8_t init)
-{
-	uint8_t crc = init;
-	//Header + Address + Command
-	for (size_t byte = 0; byte < (n - 1) ; byte++) {
-		crc += buf[byte];
-	}
-
-	return crc;
-}
-
-int Cytron::_transaction(uint8_t *wbuff, size_t wbytes,
-			   uint8_t *rbuff, size_t rbytes, bool send_checksum, bool recv_checksum)
-{
-	int err_code = 0;
-
-	// WRITE
-	tcflush(_uart, TCIOFLUSH); // flush  buffers
-	uint8_t buf[wbytes + 3];
-	buf[0] = 85;
-	buf[1] = 0x00;
-
-	//Value
-	if (wbuff) {
-		memcpy(&buf[2], wbuff, wbytes);
-	}
-
-	if (send_checksum) {
-		uint8_t sum = _calcCRC(buf, 4);
-		buf[3] = sum;
-	}
-
-	int count = write(_uart, buf, wbytes);
-
-	if (count < (int) wbytes) { // Did not successfully send all bytes.
-		PX4_ERR("Only wrote %d out of %zu bytes", count, wbytes);
-		return -1;
-	}
-
-	// READ
-
-	FD_ZERO(&_uart_set);
-	FD_SET(_uart, &_uart_set);
-
-	uint8_t *rbuff_curr = rbuff;
-	size_t bytes_read = 0;
-
-	// select(...) returns as soon as even 1 byte is available. read(...) returns immediately, no matter how many
-	// bytes are available. I need to keep reading until I get the number of bytes I expect.
-	while (bytes_read < rbytes) {
-		// select(...) may change this timeout struct (because it is not const). So I reset it every time.
-		_uart_timeout.tv_sec = 0;
-		_uart_timeout.tv_usec = TIMEOUT_US;
-		err_code = select(_uart + 1, &_uart_set, nullptr, nullptr, &_uart_timeout);
-
-		// An error code of 0 means that select timed out, which is how the Cytron indicates an error.
-		if (err_code <= 0) {
-			return err_code;
-		}
-
-		err_code = read(_uart, rbuff_curr, rbytes - bytes_read);
-
-		if (err_code <= 0) {
-			return err_code;
-
-		} else {
-			bytes_read += err_code;
-			rbuff_curr += err_code;
-		}
-	}
-
-	//TODO: Clean up this mess of IFs and returns
-
-	if (recv_checksum) {
-		if (bytes_read < 2) {
-			return -1;
-		}
-
-		// The checksum sent back by the cytron is calculated based on the address and command bytes as well
-		// as the data returned.
-		uint16_t checksum_calc = _calcCRC(buf, 2);
-		checksum_calc = _calcCRC(rbuff, bytes_read - 2, checksum_calc);
-		uint16_t checksum_recv = (rbuff[bytes_read - 2] << 8) + rbuff[bytes_read - 1];
-
-		if (checksum_calc == checksum_recv) {
-			return bytes_read;
-
-		} else {
-			return -10;
-		}
-
-	} else {
-		if (bytes_read == 1 && rbuff[0] == 0xFF) {
-			return 1;
-
-		} else {
-			return -11;
-		}
-	}
-}
-
-void Cytron::_parameters_update()
-{
-	param_get(_param_handles.actuator_write_period_ms, &_parameters.actuator_write_period_ms);
-	param_get(_param_handles.address, &_parameters.address);
-
-	if (_actuatorsSub > 0) {
-		orb_set_interval(_actuatorsSub, _parameters.actuator_write_period_ms);
-	}
-
-	int32_t baudRate;
-	param_get(_param_handles.serial_baud_rate, &baudRate);
-
-	switch (baudRate) {
-	case 2400:
-		_parameters.serial_baud_rate = B2400;
-		break;
-
-	case 9600:
-		_parameters.serial_baud_rate = B9600;
-		break;
-
-	case 19200:
-		_parameters.serial_baud_rate = B19200;
-		break;
-
-	case 38400:
-		_parameters.serial_baud_rate = B38400;
-		break;
-
-	case 57600:
-		_parameters.serial_baud_rate = B57600;
-		break;
-
-	case 115200:
-		_parameters.serial_baud_rate = B115200;
-		break;
-
-	case 230400:
-		_parameters.serial_baud_rate = B230400;
-		break;
-
-	case 460800:
-		_parameters.serial_baud_rate = B460800;
-		break;
-
-	default:
-		_parameters.serial_baud_rate = B2400;
-	}
+            // Publish the updated value of the actuator_outputs topic
+            actuator_outputs_s actuator_outputs = {};
+            actuator_outputs.output[0] = _duty_cycle;
+            orb_publish(ORB_ID(actuator_outputs), _actuator_outputs_pub, &actuator_outputs);
+        }
+    }
 }
