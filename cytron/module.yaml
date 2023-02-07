@@ -1,3 +1,0 @@
-module_name: Cytron Driver
-Commands:
-    - command: cytron start ${PWM_INDEX} ${PWM_FREQUENCY}
